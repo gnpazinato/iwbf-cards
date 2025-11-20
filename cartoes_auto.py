@@ -77,6 +77,7 @@ def gerar_pdf_final(template_bytes, card_files):
     - Detects rectangles in the template.
     - For each player card PDF (two sides side-by-side):
         * Split the page vertically
+        * Crop ONLY the top region (same aspect as the template slot)
         * Place left half in left slot, right half in right slot
     - Each row = 1 player card (front+back)
     """
@@ -88,6 +89,12 @@ def gerar_pdf_final(template_bytes, card_files):
         raise RuntimeError(
             f"Template row has {slots_per_row} rectangles; expected an even number (2 per card)."
         )
+
+    # Use first slot to compute desired aspect ratio (height/width)
+    first_slot = rows[0][0]
+    slot_width = first_slot.width
+    slot_height = first_slot.height
+    slot_ratio = slot_height / slot_width  # h / w
 
     # Render template as image for reuse
     doc_template = fitz.open(stream=template_bytes, filetype="pdf")
@@ -127,18 +134,24 @@ def gerar_pdf_final(template_bytes, card_files):
             # split card in half
             card_w = page_card.rect.width
             card_h = page_card.rect.height
-            mid_x = card_w / 2.0
+            half_w = card_w / 2.0
+
+            # we want a crop with SAME aspect as the template slot
+            # visible_height = half_w * (slot_height / slot_width)
+            visible_height = half_w * slot_ratio
+            if visible_height > card_h:
+                visible_height = card_h  # safety
 
             zoom_card = 300 / 72
             mat_card = fitz.Matrix(zoom_card, zoom_card)
 
-            # left half
-            clip_L = fitz.Rect(0, 0, mid_x, card_h)
+            # left half – crop only the top region with correct aspect
+            clip_L = fitz.Rect(0, 0, half_w, visible_height)
             pix_L = page_card.get_pixmap(matrix=mat_card, clip=clip_L, alpha=False)
             img_L = ImageReader(BytesIO(pix_L.tobytes("png")))
 
-            # right half
-            clip_R = fitz.Rect(mid_x, 0, card_w, card_h)
+            # right half – same crop, shifted to the right
+            clip_R = fitz.Rect(half_w, 0, card_w, visible_height)
             pix_R = page_card.get_pixmap(matrix=mat_card, clip=clip_R, alpha=False)
             img_R = ImageReader(BytesIO(pix_R.tobytes("png")))
 
@@ -146,7 +159,7 @@ def gerar_pdf_final(template_bytes, card_files):
             xL, yL, wL, hL = rect_to_reportlab_coords(slot_left, page_height)
             xR, yR, wR, hR = rect_to_reportlab_coords(slot_right, page_height)
 
-            # fill the full rectangle (NO aspect ratio)
+            # fill the full rectangle (NO aspect ratio) – now with cropped content
             c.drawImage(img_L, xL, yL, width=wL, height=hL,
                         preserveAspectRatio=False, anchor="sw")
 
@@ -166,12 +179,14 @@ def gerar_pdf_final(template_bytes, card_files):
 st.title("🪪 Automatic Card Generator – Two Sides on PDF Template")
 
 st.markdown("""
-Upload a card sheet template (PDF with card rectangles), then upload multiple
-player card PDFs (each PDF containing the **front and back side side-by-side**).
+Upload a **card sheet template** (PDF with the card rectangles), then upload multiple
+**player card PDFs** (each PDF containing the **front and back side side-by-side**).
 
 Each row of the template becomes **one complete card** (left rectangle = front,
 right rectangle = back).  
-Cards now fill **100% of the rectangle area** (no empty space).
+
+The app now **crops the extra white space** and makes the card content fill
+**100% of the rectangle area**.
 """)
 
 template_file = st.file_uploader("1️⃣ Upload card template PDF", type=["pdf"])
