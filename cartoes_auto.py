@@ -9,14 +9,11 @@ from reportlab.lib.utils import ImageReader
 
 def detectar_slots_template(template_bytes):
     """
-    Reads the template PDF, takes the first page, detects drawn rectangles
-    and returns:
+    Detects card rectangles in the template PDF automatically.
+    Returns:
       - page_rect: the full page rectangle
-      - slots_flat: list of fitz.Rect (all card slots, row1 left->right, row2 left->right, ...)
-      - rows: list of rows, each row is [Rect_col_left, Rect_col_right, ...]
-    Assumptions:
-      - Card slots are rectangles with the same size.
-      - They are arranged in a grid (rows / columns).
+      - slots_flat: list of all card rectangles (row1 left->right, row2 left->right, ...)
+      - rows: list of rows, each row = [left_slot, right_slot, ...]
     """
     doc = fitz.open(stream=template_bytes, filetype="pdf")
     page = doc[0]
@@ -24,36 +21,39 @@ def detectar_slots_template(template_bytes):
 
     drawings = page.get_drawings()
     rects = []
+
     for d in drawings:
         r = d.get("rect")
         if r is None:
             continue
-        # Ignore very small rectangles (borders, details, etc.)
-        if r.width > 20 and r.height > 20:
+        if r.width > 20 and r.height > 20:  # ignore tiny lines
             rects.append(r)
 
     if not rects:
-        raise RuntimeError("Could not detect any card-sized rectangles in the template.")
+        raise RuntimeError("No card rectangles found in template PDF.")
 
-    # Find the most common rectangle size (width x height)
+    # Find most common rectangle size
     from collections import Counter
     size_counter = Counter((round(r.width, 1), round(r.height, 1)) for r in rects)
     main_size, _ = size_counter.most_common(1)[0]
 
     card_rects = [r for r in rects if (round(r.width, 1), round(r.height, 1)) == main_size]
-    if len(card_rects) < 2:
-        raise RuntimeError("Found too few card rectangles in the template.")
 
-    # Group rectangles by row using y0 (PyMuPDF origin is top-left; y increases downward)
+    if len(card_rects) < 2:
+        raise RuntimeError("Template does not contain enough card rectangles.")
+
+    # Group by row (y0), PyMuPDF origin = top-left
     from collections import defaultdict
     rows_dict = defaultdict(list)
+
     for r in card_rects:
         key_y = round(r.y0, 1)
         rows_dict[key_y].append(r)
 
-    # Sort rows (top -> bottom), and within each row sort columns (left -> right)
+    # Sort rows top->bottom, columns left->right
     row_keys = sorted(rows_dict.keys())
     rows = []
+
     for y in row_keys:
         row_rects = sorted(rows_dict[y], key=lambda rc: rc.x0)
         rows.append(row_rects)
@@ -63,10 +63,7 @@ def detectar_slots_template(template_bytes):
 
 
 def rect_to_reportlab_coords(r, page_height):
-    """
-    Convert a fitz.Rect (origin top-left) to ReportLab coordinates
-    (origin bottom-left).
-    """
+    """Convert PyMuPDF top-left coordinates to ReportLab bottom-left coordinates."""
     x = r.x0
     y = page_height - r.y1
     w = r.width
@@ -76,102 +73,85 @@ def rect_to_reportlab_coords(r, page_height):
 
 def gerar_pdf_final(template_bytes, card_files):
     """
-    - Reads the template and detects card slots.
-    - Assumes 2 slots per row (left/right) = 1 full card (front + back).
-    - For each player card PDF (with two sides side-by-side):
-        * splits the page in half (vertical),
-        * places left half into the left slot,
-        * places right half into the right slot.
-    - When all rows are used, starts a new page.
-    Returns the final PDF as bytes.
+    Creates the final PDF:
+    - Detects rectangles in the template.
+    - For each player card PDF (two sides side-by-side):
+        * Split the page vertically
+        * Place left half in left slot, right half in right slot
+    - Each row = 1 player card (front+back)
     """
-    # Detect slots on the template page
     page_rect, slots_flat, rows = detectar_slots_template(template_bytes)
     page_width, page_height = page_rect.width, page_rect.height
 
     slots_per_row = len(rows[0])
     if slots_per_row < 2 or slots_per_row % 2 != 0:
         raise RuntimeError(
-            f"Unexpected layout: first row has {slots_per_row} rectangles; "
-            "expected an even number (left/right per card)."
+            f"Template row has {slots_per_row} rectangles; expected an even number (2 per card)."
         )
 
-    # Render the template page as an image (used as background on each page)
+    # Render template as image for reuse
     doc_template = fitz.open(stream=template_bytes, filetype="pdf")
     page_template = doc_template[0]
-    zoom_template = 300 / 72  # ~300 dpi
+
+    zoom_template = 300 / 72
     mat_template = fitz.Matrix(zoom_template, zoom_template)
     pix_template = page_template.get_pixmap(matrix=mat_template, alpha=False)
     template_img = ImageReader(BytesIO(pix_template.tobytes("png")))
 
-    # Read all player card PDFs into memory (bytes list)
+    # Read all cards into memory
     card_bytes_list = [f.read() for f in card_files]
     total_cards = len(card_bytes_list)
     card_idx = 0
 
-    # Create output PDF with ReportLab
     output_buffer = BytesIO()
     c = canvas.Canvas(output_buffer, pagesize=(page_width, page_height))
 
     while card_idx < total_cards:
-        # Draw the template as the background
+
+        # draw template background
         c.drawImage(template_img, 0, 0, width=page_width, height=page_height)
 
-        # Iterate over template rows; each row holds one full card (2 slots)
         for row_rects in rows:
             if card_idx >= total_cards:
                 break
             if len(row_rects) < 2:
-                continue  # safety
+                continue
 
-            slot_left = row_rects[0]   # left column (first half of card)
-            slot_right = row_rects[1]  # right column (second half of card)
+            slot_left = row_rects[0]
+            slot_right = row_rects[1]
 
             card_bytes = card_bytes_list[card_idx]
             doc_card = fitz.open(stream=card_bytes, filetype="pdf")
             page_card = doc_card[0]
 
-            # Split the player card page in half (vertical)
-            card_w, card_h = page_card.rect.width, page_card.rect.height
+            # split card in half
+            card_w = page_card.rect.width
+            card_h = page_card.rect.height
             mid_x = card_w / 2.0
+
             zoom_card = 300 / 72
             mat_card = fitz.Matrix(zoom_card, zoom_card)
 
-            # Left side
-            clip_left = fitz.Rect(0, 0, mid_x, card_h)
-            pix_left = page_card.get_pixmap(matrix=mat_card, clip=clip_left, alpha=False)
-            img_left = ImageReader(BytesIO(pix_left.tobytes("png")))
+            # left half
+            clip_L = fitz.Rect(0, 0, mid_x, card_h)
+            pix_L = page_card.get_pixmap(matrix=mat_card, clip=clip_L, alpha=False)
+            img_L = ImageReader(BytesIO(pix_L.tobytes("png")))
 
-            # Right side
-            clip_right = fitz.Rect(mid_x, 0, card_w, card_h)
-            pix_right = page_card.get_pixmap(matrix=mat_card, clip=clip_right, alpha=False)
-            img_right = ImageReader(BytesIO(pix_right.tobytes("png")))
+            # right half
+            clip_R = fitz.Rect(mid_x, 0, card_w, card_h)
+            pix_R = page_card.get_pixmap(matrix=mat_card, clip=clip_R, alpha=False)
+            img_R = ImageReader(BytesIO(pix_R.tobytes("png")))
 
-            # Convert slot coordinates to ReportLab coordinates
+            # coordinates
             xL, yL, wL, hL = rect_to_reportlab_coords(slot_left, page_height)
             xR, yR, wR, hR = rect_to_reportlab_coords(slot_right, page_height)
 
-            # Draw both halves into the slot rectangles.
-            # IMPORTANT: preserveAspectRatio=False → fill the slot completely.
-            c.drawImage(
-                img_left,
-                xL,
-                yL,
-                width=wL,
-                height=hL,
-                preserveAspectRatio=False,
-                anchor="sw",
-            )
+            # fill the full rectangle (NO aspect ratio)
+            c.drawImage(img_L, xL, yL, width=wL, height=hL,
+                        preserveAspectRatio=False, anchor="sw")
 
-            c.drawImage(
-                img_right,
-                xR,
-                yR,
-                width=wR,
-                height=hR,
-                preserveAspectRatio=False,
-                anchor="sw",
-            )
+            c.drawImage(img_R, xR, yR, width=wR, height=hR,
+                        preserveAspectRatio=False, anchor="sw")
 
             card_idx += 1
 
@@ -183,33 +163,23 @@ def gerar_pdf_final(template_bytes, card_files):
 
 # ---------- Streamlit UI ----------
 
-st.title("🪪 Automatic card imposition on PDF template")
+st.title("🪪 Automatic Card Generator – Two Sides on PDF Template")
 
-st.markdown(
-    """
-This app:
+st.markdown("""
+Upload a card sheet template (PDF with card rectangles), then upload multiple
+player card PDFs (each PDF containing the **front and back side side-by-side**).
 
-1. Takes a **PDF template** (e.g. Avery 8859) that contains the card grid.  
-2. Detects all card rectangles automatically.  
-3. Accepts multiple **player card PDFs**, each one with **two sides side-by-side**.  
-4. For each card:
-   - left half → left rectangle in a row  
-   - right half → right rectangle in the same row  
-5. Produces a final PDF ready to print on the card sheet.
-"""
-)
+Each row of the template becomes **one complete card** (left rectangle = front,
+right rectangle = back).  
+Cards now fill **100% of the rectangle area** (no empty space).
+""")
 
-template_file = st.file_uploader("1️⃣ Upload the card sheet template PDF", type=["pdf"])
-
-card_files = st.file_uploader(
-    "2️⃣ Upload individual player card PDFs (each with front & back side-by-side)",
-    type=["pdf"],
-    accept_multiple_files=True,
-)
+template_file = st.file_uploader("1️⃣ Upload card template PDF", type=["pdf"])
+card_files = st.file_uploader("2️⃣ Upload player card PDFs", type=["pdf"], accept_multiple_files=True)
 
 if st.button("3️⃣ Generate final PDF"):
     if not template_file:
-        st.error("Please upload the template PDF first.")
+        st.error("Please upload the template PDF.")
     elif not card_files:
         st.error("Please upload at least one player card PDF.")
     else:
@@ -219,10 +189,10 @@ if st.button("3️⃣ Generate final PDF"):
 
             st.success("PDF generated successfully! 🎉")
             st.download_button(
-                label="⬇️ Download final PDF",
+                "⬇️ Download final PDF",
                 data=pdf_bytes,
                 file_name="cards_on_template.pdf",
-                mime="application/pdf",
+                mime="application/pdf"
             )
         except Exception as e:
-            st.error(f"Error while generating PDF: {e}")
+            st.error(f"Error: {e}")
