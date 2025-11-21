@@ -71,24 +71,26 @@ def rect_to_reportlab_coords(r, page_height):
     return x, y, w, h
 
 
-def fit_and_center(slot_x, slot_y, slot_w, slot_h, pix):
+def fit_and_center(slot_x, slot_y, slot_w, slot_h, pix, margin_factor=0.9):
     """
-    Given a slot rectangle (in points) and a pixmap (image) with width/height in pixels,
-    compute the size and position so that the image:
-      - fits entirely inside the slot
-      - keeps its aspect ratio
-      - is centered horizontally and vertically.
+    Fit the pixmap inside the given slot:
+      - keep aspect ratio
+      - apply a global margin factor (e.g. 0.9 = 10% padding)
+      - center horizontally and vertically.
     Returns (x, y, render_w, render_h).
     """
     img_w = pix.width
     img_h = pix.height
 
-    # scale factor to fit inside the slot
+    # scale to fit inside slot
     scale = min(slot_w / img_w, slot_h / img_h)
+
+    # apply margin factor to leave uniform borders
+    scale *= margin_factor
+
     render_w = img_w * scale
     render_h = img_h * scale
 
-    # center inside the slot
     x = slot_x + (slot_w - render_w) / 2.0
     y = slot_y + (slot_h - render_h) / 2.0
 
@@ -100,9 +102,9 @@ def gerar_pdf_final(template_bytes, card_files):
     Creates the final PDF:
     - Detects rectangles in the template.
     - For each player card PDF (two sides side-by-side):
-        * Split the page vertically
-        * Crop top region with aspect similar to slot (optional tweak)
-        * Fit and center each half inside the corresponding slot
+        * Split the page vertically into left/right halves
+        * Render each half as an image
+        * Fit and center each half in the corresponding slot
     - Each row = 1 player card (front+back)
     """
     page_rect, slots_flat, rows = detectar_slots_template(template_bytes)
@@ -113,12 +115,6 @@ def gerar_pdf_final(template_bytes, card_files):
         raise RuntimeError(
             f"Template row has {slots_per_row} rectangles; expected an even number (2 per card)."
         )
-
-    # Use first slot to compute desired aspect ratio (height/width)
-    first_slot = rows[0][0]
-    slot_width = first_slot.width
-    slot_height = first_slot.height
-    slot_ratio = slot_height / slot_width  # h / w
 
     # Render template as image for reuse
     doc_template = fitz.open(stream=template_bytes, filetype="pdf")
@@ -155,26 +151,21 @@ def gerar_pdf_final(template_bytes, card_files):
             doc_card = fitz.open(stream=card_bytes, filetype="pdf")
             page_card = doc_card[0]
 
-            # split card in half
+            # full half-pages
             card_w = page_card.rect.width
             card_h = page_card.rect.height
             half_w = card_w / 2.0
 
-            # crop top region with same aspect as slot (to remove huge empty bottom)
-            visible_height = half_w * slot_ratio
-            if visible_height > card_h:
-                visible_height = card_h  # safety
-
             zoom_card = 300 / 72
             mat_card = fitz.Matrix(zoom_card, zoom_card)
 
-            # left half – crop
-            clip_L = fitz.Rect(0, 0, half_w, visible_height)
+            # left half (0 .. half_w)
+            clip_L = fitz.Rect(0, 0, half_w, card_h)
             pix_L = page_card.get_pixmap(matrix=mat_card, clip=clip_L, alpha=False)
             img_L = ImageReader(BytesIO(pix_L.tobytes("png")))
 
-            # right half – crop
-            clip_R = fitz.Rect(half_w, 0, card_w, visible_height)
+            # right half (half_w .. card_w)
+            clip_R = fitz.Rect(half_w, 0, card_w, card_h)
             pix_R = page_card.get_pixmap(matrix=mat_card, clip=clip_R, alpha=False)
             img_R = ImageReader(BytesIO(pix_R.tobytes("png")))
 
@@ -182,11 +173,11 @@ def gerar_pdf_final(template_bytes, card_files):
             xL_slot, yL_slot, wL_slot, hL_slot = rect_to_reportlab_coords(slot_left, page_height)
             xR_slot, yR_slot, wR_slot, hR_slot = rect_to_reportlab_coords(slot_right, page_height)
 
-            # compute centered positions/sizes
+            # compute centered positions/sizes with margin
             xL, yL, wL, hL = fit_and_center(xL_slot, yL_slot, wL_slot, hL_slot, pix_L)
             xR, yR, wR, hR = fit_and_center(xR_slot, yR_slot, wR_slot, hR_slot, pix_R)
 
-            # draw images, now centered in the slot
+            # draw images, centered in the slot
             c.drawImage(img_L, xL, yL, width=wL, height=hL,
                         preserveAspectRatio=False, anchor="sw")
 
@@ -212,8 +203,8 @@ Upload a **card sheet template** (PDF with the card rectangles), then upload mul
 Each row of the template becomes **one complete card** (left rectangle = front,
 right rectangle = back).  
 
-The app now **crops extra white space** and also **centers the card inside each rectangle
-both horizontally and vertically**.
+Cards are now **scaled with padding and centered** horizontally and vertically
+inside each template rectangle.
 """)
 
 template_file = st.file_uploader("1️⃣ Upload card template PDF", type=["pdf"])
