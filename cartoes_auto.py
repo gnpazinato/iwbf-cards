@@ -71,11 +71,55 @@ def rect_to_reportlab_coords(r, page_height):
     return x, y, w, h
 
 
-def fit_and_center(slot_x, slot_y, slot_w, slot_h, pix, margin_factor=0.9):
+def trim_pixmap(pix, bg_threshold=250):
+    """
+    Content-aware trim: remove white borders around the card.
+    - bg_threshold: 0..255, higher = more aggressive trim (treat near-white as background)
+    Returns a new Pixmap (cropped) or the original if nothing is found.
+    """
+    w, h, n = pix.width, pix.height, pix.n
+    samples = pix.samples  # bytes
+
+    min_x, min_y = w, h
+    max_x, max_y = -1, -1
+
+    # Iterate over all pixels
+    for y in range(h):
+        row_index = y * w * n
+        for x in range(w):
+            idx = row_index + x * n
+            # check RGB channels only (ignore alpha if present)
+            r = samples[idx]
+            g = samples[idx + 1] if n > 1 else samples[idx]
+            b = samples[idx + 2] if n > 2 else samples[idx]
+
+            # pixel considered "content" if any channel is darker than bg_threshold
+            if r < bg_threshold or g < bg_threshold or b < bg_threshold:
+                if x < min_x:
+                    min_x = x
+                if x > max_x:
+                    max_x = x
+                if y < min_y:
+                    min_y = y
+                if y > max_y:
+                    max_y = y
+
+    # If no content found, return original pixmap
+    if max_x < 0 or max_y < 0:
+        return pix
+
+    # Create crop rectangle in pixel coordinates
+    # +1 on max_x / max_y to include the last pixel
+    rect = fitz.Rect(min_x, min_y, max_x + 1, max_y + 1)
+    cropped = fitz.Pixmap(pix, rect)
+    return cropped
+
+
+def fit_and_center(slot_x, slot_y, slot_w, slot_h, pix, margin_factor=0.95):
     """
     Fit the pixmap inside the given slot:
       - keep aspect ratio
-      - apply a global margin factor (e.g. 0.9 = 10% padding)
+      - apply a global margin factor (e.g. 0.95 = 5% padding)
       - center horizontally and vertically.
     Returns (x, y, render_w, render_h).
     """
@@ -104,6 +148,7 @@ def gerar_pdf_final(template_bytes, card_files):
     - For each player card PDF (two sides side-by-side):
         * Split the page vertically into left/right halves
         * Render each half as an image
+        * Trim white borders (content-aware crop)
         * Fit and center each half in the corresponding slot
     - Each row = 1 player card (front+back)
     """
@@ -151,7 +196,6 @@ def gerar_pdf_final(template_bytes, card_files):
             doc_card = fitz.open(stream=card_bytes, filetype="pdf")
             page_card = doc_card[0]
 
-            # full half-pages
             card_w = page_card.rect.width
             card_h = page_card.rect.height
             half_w = card_w / 2.0
@@ -162,11 +206,13 @@ def gerar_pdf_final(template_bytes, card_files):
             # left half (0 .. half_w)
             clip_L = fitz.Rect(0, 0, half_w, card_h)
             pix_L = page_card.get_pixmap(matrix=mat_card, clip=clip_L, alpha=False)
+            pix_L = trim_pixmap(pix_L)  # remove white borders
             img_L = ImageReader(BytesIO(pix_L.tobytes("png")))
 
             # right half (half_w .. card_w)
             clip_R = fitz.Rect(half_w, 0, card_w, card_h)
             pix_R = page_card.get_pixmap(matrix=mat_card, clip=clip_R, alpha=False)
+            pix_R = trim_pixmap(pix_R)  # remove white borders
             img_R = ImageReader(BytesIO(pix_R.tobytes("png")))
 
             # slot coordinates (ReportLab)
@@ -203,8 +249,9 @@ Upload a **card sheet template** (PDF with the card rectangles), then upload mul
 Each row of the template becomes **one complete card** (left rectangle = front,
 right rectangle = back).  
 
-Cards are now **scaled with padding and centered** horizontally and vertically
-inside each template rectangle.
+The app now:
+- **removes white borders** around the card artwork, and  
+- **centers** the card horizontally and vertically inside each rectangle.
 """)
 
 template_file = st.file_uploader("1️⃣ Upload card template PDF", type=["pdf"])
