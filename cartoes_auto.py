@@ -5,13 +5,13 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 
 
-# ---------- Utility functions ----------
+# ---------- Template analysis ----------
 
 def detectar_slots_template(template_bytes):
     """
     Detects card rectangles in the template PDF automatically.
     Returns:
-      - page_rect: the full page rectangle
+      - page_rect: full page rectangle
       - slots_flat: list of all card rectangles (row1 left->right, row2 left->right, ...)
       - rows: list of rows, each row = [left_slot, right_slot, ...]
     """
@@ -26,14 +26,16 @@ def detectar_slots_template(template_bytes):
         r = d.get("rect")
         if r is None:
             continue
-        if r.width > 20 and r.height > 20:  # ignore tiny lines
+        # ignore tiny rectangles (borders, etc.)
+        if r.width > 20 and r.height > 20:
             rects.append(r)
 
     if not rects:
         raise RuntimeError("No card rectangles found in template PDF.")
 
-    # Find most common rectangle size
-    from collections import Counter
+    from collections import Counter, defaultdict
+
+    # Most common rectangle size
     size_counter = Counter((round(r.width, 1), round(r.height, 1)) for r in rects)
     main_size, _ = size_counter.most_common(1)[0]
 
@@ -42,10 +44,8 @@ def detectar_slots_template(template_bytes):
     if len(card_rects) < 2:
         raise RuntimeError("Template does not contain enough card rectangles.")
 
-    # Group by row (y0), PyMuPDF origin = top-left
-    from collections import defaultdict
+    # Group by row (y0). PyMuPDF origin = top-left
     rows_dict = defaultdict(list)
-
     for r in card_rects:
         key_y = round(r.y0, 1)
         rows_dict[key_y].append(r)
@@ -53,7 +53,6 @@ def detectar_slots_template(template_bytes):
     # Sort rows top->bottom, columns left->right
     row_keys = sorted(rows_dict.keys())
     rows = []
-
     for y in row_keys:
         row_rects = sorted(rows_dict[y], key=lambda rc: rc.x0)
         rows.append(row_rects)
@@ -63,7 +62,9 @@ def detectar_slots_template(template_bytes):
 
 
 def rect_to_reportlab_coords(r, page_height):
-    """Convert PyMuPDF top-left coordinates to ReportLab bottom-left coordinates."""
+    """
+    Convert PyMuPDF (top-left origin) to ReportLab (bottom-left origin).
+    """
     x = r.x0
     y = page_height - r.y1
     w = r.width
@@ -71,29 +72,32 @@ def rect_to_reportlab_coords(r, page_height):
     return x, y, w, h
 
 
-def trim_pixmap(pix, bg_threshold=250):
+# ---------- Content-aware crop on the card halves ----------
+
+def compute_trimmed_clip(page, base_clip, zoom, bg_threshold=250):
     """
-    Content-aware trim: remove white borders around the card.
-    - bg_threshold: 0..255, higher = more aggressive trim (treat near-white as background)
-    Returns a new Pixmap (cropped) or the original if nothing is found.
+    Given a base clip in page coordinates, renders that area,
+    finds the bounding box of non-white pixels, and returns a tighter
+    clip in page coordinates. If nothing is found, returns base_clip.
     """
+    mat = fitz.Matrix(zoom, zoom)
+    pix = page.get_pixmap(matrix=mat, clip=base_clip, alpha=False)
+
     w, h, n = pix.width, pix.height, pix.n
-    samples = pix.samples  # bytes
+    samples = pix.samples  # bytes / memoryview
 
     min_x, min_y = w, h
     max_x, max_y = -1, -1
 
-    # Iterate over all pixels
     for y in range(h):
         row_index = y * w * n
         for x in range(w):
             idx = row_index + x * n
-            # check RGB channels only (ignore alpha if present)
             r = samples[idx]
             g = samples[idx + 1] if n > 1 else samples[idx]
             b = samples[idx + 2] if n > 2 else samples[idx]
 
-            # pixel considered "content" if any channel is darker than bg_threshold
+            # Consider "content" any pixel darker than bg_threshold
             if r < bg_threshold or g < bg_threshold or b < bg_threshold:
                 if x < min_x:
                     min_x = x
@@ -104,32 +108,34 @@ def trim_pixmap(pix, bg_threshold=250):
                 if y > max_y:
                     max_y = y
 
-    # If no content found, return original pixmap
+    # No content found: return original clip
     if max_x < 0 or max_y < 0:
-        return pix
+        return base_clip
 
-    # Create crop rectangle in pixel coordinates
-    # +1 on max_x / max_y to include the last pixel
-    rect = fitz.Rect(min_x, min_y, max_x + 1, max_y + 1)
-    cropped = fitz.Pixmap(pix, rect)
-    return cropped
+    # Map pixel coordinates back to page coordinates
+    inv = 1.0 / zoom
+
+    x0p, y0p, x1p, y1p = base_clip
+    new_x0 = x0p + min_x * inv
+    new_x1 = x0p + (max_x + 1) * inv
+    new_y0 = y0p + min_y * inv
+    new_y1 = y0p + (max_y + 1) * inv
+
+    return fitz.Rect(new_x0, new_y0, new_x1, new_y1)
 
 
 def fit_and_center(slot_x, slot_y, slot_w, slot_h, pix, margin_factor=0.95):
     """
     Fit the pixmap inside the given slot:
       - keep aspect ratio
-      - apply a global margin factor (e.g. 0.95 = 5% padding)
+      - apply a small margin (e.g. 0.95 = 5% padding)
       - center horizontally and vertically.
     Returns (x, y, render_w, render_h).
     """
     img_w = pix.width
     img_h = pix.height
 
-    # scale to fit inside slot
     scale = min(slot_w / img_w, slot_h / img_h)
-
-    # apply margin factor to leave uniform borders
     scale *= margin_factor
 
     render_w = img_w * scale
@@ -141,16 +147,16 @@ def fit_and_center(slot_x, slot_y, slot_w, slot_h, pix, margin_factor=0.95):
     return x, y, render_w, render_h
 
 
+# ---------- Main PDF generation ----------
+
 def gerar_pdf_final(template_bytes, card_files):
     """
-    Creates the final PDF:
     - Detects rectangles in the template.
     - For each player card PDF (two sides side-by-side):
         * Split the page vertically into left/right halves
-        * Render each half as an image
-        * Trim white borders (content-aware crop)
-        * Fit and center each half in the corresponding slot
-    - Each row = 1 player card (front+back)
+        * Auto-trim white borders around each half
+        * Fit and center each half in its slot
+    - Each row in the template = 1 player card (front + back).
     """
     page_rect, slots_flat, rows = detectar_slots_template(template_bytes)
     page_width, page_height = page_rect.width, page_rect.height
@@ -161,16 +167,16 @@ def gerar_pdf_final(template_bytes, card_files):
             f"Template row has {slots_per_row} rectangles; expected an even number (2 per card)."
         )
 
-    # Render template as image for reuse
+    # Render template page as image (background for each page)
     doc_template = fitz.open(stream=template_bytes, filetype="pdf")
     page_template = doc_template[0]
 
-    zoom_template = 300 / 72
+    zoom_template = 300 / 72.0
     mat_template = fitz.Matrix(zoom_template, zoom_template)
     pix_template = page_template.get_pixmap(matrix=mat_template, alpha=False)
     template_img = ImageReader(BytesIO(pix_template.tobytes("png")))
 
-    # Read all cards into memory
+    # Read all card PDFs into memory
     card_bytes_list = [f.read() for f in card_files]
     total_cards = len(card_bytes_list)
     card_idx = 0
@@ -178,8 +184,9 @@ def gerar_pdf_final(template_bytes, card_files):
     output_buffer = BytesIO()
     c = canvas.Canvas(output_buffer, pagesize=(page_width, page_height))
 
-    while card_idx < total_cards:
+    zoom_card = 300 / 72.0  # same DPI for cards
 
+    while card_idx < total_cards:
         # draw template background
         c.drawImage(template_img, 0, 0, width=page_width, height=page_height)
 
@@ -200,33 +207,33 @@ def gerar_pdf_final(template_bytes, card_files):
             card_h = page_card.rect.height
             half_w = card_w / 2.0
 
-            zoom_card = 300 / 72
+            # base halves (page coordinates)
+            base_L = fitz.Rect(0, 0, half_w, card_h)
+            base_R = fitz.Rect(half_w, 0, card_w, card_h)
+
+            # compute tighter clips using content-aware trim
+            clip_L = compute_trimmed_clip(page_card, base_L, zoom_card)
+            clip_R = compute_trimmed_clip(page_card, base_R, zoom_card)
+
             mat_card = fitz.Matrix(zoom_card, zoom_card)
 
-            # left half (0 .. half_w)
-            clip_L = fitz.Rect(0, 0, half_w, card_h)
             pix_L = page_card.get_pixmap(matrix=mat_card, clip=clip_L, alpha=False)
-            pix_L = trim_pixmap(pix_L)  # remove white borders
-            img_L = ImageReader(BytesIO(pix_L.tobytes("png")))
-
-            # right half (half_w .. card_w)
-            clip_R = fitz.Rect(half_w, 0, card_w, card_h)
             pix_R = page_card.get_pixmap(matrix=mat_card, clip=clip_R, alpha=False)
-            pix_R = trim_pixmap(pix_R)  # remove white borders
+
+            img_L = ImageReader(BytesIO(pix_L.tobytes("png")))
             img_R = ImageReader(BytesIO(pix_R.tobytes("png")))
 
-            # slot coordinates (ReportLab)
+            # slot coordinates in ReportLab system
             xL_slot, yL_slot, wL_slot, hL_slot = rect_to_reportlab_coords(slot_left, page_height)
             xR_slot, yR_slot, wR_slot, hR_slot = rect_to_reportlab_coords(slot_right, page_height)
 
-            # compute centered positions/sizes with margin
+            # compute centered positions/sizes
             xL, yL, wL, hL = fit_and_center(xL_slot, yL_slot, wL_slot, hL_slot, pix_L)
             xR, yR, wR, hR = fit_and_center(xR_slot, yR_slot, wR_slot, hR_slot, pix_R)
 
-            # draw images, centered in the slot
+            # draw images centered in the slot
             c.drawImage(img_L, xL, yL, width=wL, height=hL,
                         preserveAspectRatio=False, anchor="sw")
-
             c.drawImage(img_R, xR, yR, width=wR, height=hR,
                         preserveAspectRatio=False, anchor="sw")
 
@@ -243,19 +250,22 @@ def gerar_pdf_final(template_bytes, card_files):
 st.title("🪪 Automatic Card Generator – Two Sides on PDF Template")
 
 st.markdown("""
-Upload a **card sheet template** (PDF with the card rectangles), then upload multiple
-**player card PDFs** (each PDF containing the **front and back side side-by-side**).
+Upload a **card sheet template** (PDF with card rectangles), then upload multiple
+**player card PDFs** (each PDF containing **front and back side side-by-side**).
 
-Each row of the template becomes **one complete card** (left rectangle = front,
-right rectangle = back).  
+Each template row becomes **one complete card** (left rectangle = front, right rectangle = back).
 
 The app now:
-- **removes white borders** around the card artwork, and  
+- **removes white borders** around the card artwork, and
 - **centers** the card horizontally and vertically inside each rectangle.
 """)
 
 template_file = st.file_uploader("1️⃣ Upload card template PDF", type=["pdf"])
-card_files = st.file_uploader("2️⃣ Upload player card PDFs", type=["pdf"], accept_multiple_files=True)
+card_files = st.file_uploader(
+    "2️⃣ Upload player card PDFs (front+back side-by-side)",
+    type=["pdf"],
+    accept_multiple_files=True
+)
 
 if st.button("3️⃣ Generate final PDF"):
     if not template_file:
@@ -269,10 +279,10 @@ if st.button("3️⃣ Generate final PDF"):
 
             st.success("PDF generated successfully! 🎉")
             st.download_button(
-                "⬇️ Download final PDF",
+                label="⬇️ Download final PDF",
                 data=pdf_bytes,
                 file_name="cards_on_template.pdf",
-                mime="application/pdf"
+                mime="application/pdf",
             )
         except Exception as e:
             st.error(f"Error: {e}")
