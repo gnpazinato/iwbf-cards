@@ -157,6 +157,9 @@ def gerar_pdf_final(template_bytes, card_files):
         * Auto-trim white borders around each half
         * Fit and center each half in its slot
     - Each row in the template = 1 player card (front + back).
+
+    NOTE: The final PDF does NOT draw the template background,
+    so no rectangle lines appear in the output.
     """
     page_rect, slots_flat, rows = detectar_slots_template(template_bytes)
     page_width, page_height = page_rect.width, page_rect.height
@@ -167,15 +170,6 @@ def gerar_pdf_final(template_bytes, card_files):
             f"Template row has {slots_per_row} rectangles; expected an even number (2 per card)."
         )
 
-    # Render template page as image (background for each page)
-    doc_template = fitz.open(stream=template_bytes, filetype="pdf")
-    page_template = doc_template[0]
-
-    zoom_template = 300 / 72.0
-    mat_template = fitz.Matrix(zoom_template, zoom_template)
-    pix_template = page_template.get_pixmap(matrix=mat_template, alpha=False)
-    template_img = ImageReader(BytesIO(pix_template.tobytes("png")))
-
     # Read all card PDFs into memory
     card_bytes_list = [f.read() for f in card_files]
     total_cards = len(card_bytes_list)
@@ -184,11 +178,10 @@ def gerar_pdf_final(template_bytes, card_files):
     output_buffer = BytesIO()
     c = canvas.Canvas(output_buffer, pagesize=(page_width, page_height))
 
-    zoom_card = 300 / 72.0  # same DPI for cards
+    zoom_card = 300 / 72.0  # DPI for cards
 
     while card_idx < total_cards:
-        # draw template background
-        c.drawImage(template_img, 0, 0, width=page_width, height=page_height)
+        # DO NOT draw template background here → page stays white/blank
 
         for row_rects in rows:
             if card_idx >= total_cards:
@@ -255,9 +248,10 @@ Upload a **card sheet template** (PDF with card rectangles), then upload multipl
 
 Each template row becomes **one complete card** (left rectangle = front, right rectangle = back).
 
-The app now:
-- **removes white borders** around the card artwork, and
-- **centers** the card horizontally and vertically inside each rectangle.
+The final PDF:
+- uses the template only to detect card positions,
+- **does not draw any template lines**, and
+- shows only the centered cards on a clean white page.
 """)
 
 template_file = st.file_uploader("1️⃣ Upload card template PDF", type=["pdf"])
