@@ -71,14 +71,38 @@ def rect_to_reportlab_coords(r, page_height):
     return x, y, w, h
 
 
+def fit_and_center(slot_x, slot_y, slot_w, slot_h, pix):
+    """
+    Given a slot rectangle (in points) and a pixmap (image) with width/height in pixels,
+    compute the size and position so that the image:
+      - fits entirely inside the slot
+      - keeps its aspect ratio
+      - is centered horizontally and vertically.
+    Returns (x, y, render_w, render_h).
+    """
+    img_w = pix.width
+    img_h = pix.height
+
+    # scale factor to fit inside the slot
+    scale = min(slot_w / img_w, slot_h / img_h)
+    render_w = img_w * scale
+    render_h = img_h * scale
+
+    # center inside the slot
+    x = slot_x + (slot_w - render_w) / 2.0
+    y = slot_y + (slot_h - render_h) / 2.0
+
+    return x, y, render_w, render_h
+
+
 def gerar_pdf_final(template_bytes, card_files):
     """
     Creates the final PDF:
     - Detects rectangles in the template.
     - For each player card PDF (two sides side-by-side):
         * Split the page vertically
-        * Crop ONLY the top region (same aspect as the template slot)
-        * Place left half in left slot, right half in right slot
+        * Crop top region with aspect similar to slot (optional tweak)
+        * Fit and center each half inside the corresponding slot
     - Each row = 1 player card (front+back)
     """
     page_rect, slots_flat, rows = detectar_slots_template(template_bytes)
@@ -136,8 +160,7 @@ def gerar_pdf_final(template_bytes, card_files):
             card_h = page_card.rect.height
             half_w = card_w / 2.0
 
-            # we want a crop with SAME aspect as the template slot
-            # visible_height = half_w * (slot_height / slot_width)
+            # crop top region with same aspect as slot (to remove huge empty bottom)
             visible_height = half_w * slot_ratio
             if visible_height > card_h:
                 visible_height = card_h  # safety
@@ -145,21 +168,25 @@ def gerar_pdf_final(template_bytes, card_files):
             zoom_card = 300 / 72
             mat_card = fitz.Matrix(zoom_card, zoom_card)
 
-            # left half – crop only the top region with correct aspect
+            # left half – crop
             clip_L = fitz.Rect(0, 0, half_w, visible_height)
             pix_L = page_card.get_pixmap(matrix=mat_card, clip=clip_L, alpha=False)
             img_L = ImageReader(BytesIO(pix_L.tobytes("png")))
 
-            # right half – same crop, shifted to the right
+            # right half – crop
             clip_R = fitz.Rect(half_w, 0, card_w, visible_height)
             pix_R = page_card.get_pixmap(matrix=mat_card, clip=clip_R, alpha=False)
             img_R = ImageReader(BytesIO(pix_R.tobytes("png")))
 
-            # coordinates
-            xL, yL, wL, hL = rect_to_reportlab_coords(slot_left, page_height)
-            xR, yR, wR, hR = rect_to_reportlab_coords(slot_right, page_height)
+            # slot coordinates (ReportLab)
+            xL_slot, yL_slot, wL_slot, hL_slot = rect_to_reportlab_coords(slot_left, page_height)
+            xR_slot, yR_slot, wR_slot, hR_slot = rect_to_reportlab_coords(slot_right, page_height)
 
-            # fill the full rectangle (NO aspect ratio) – now with cropped content
+            # compute centered positions/sizes
+            xL, yL, wL, hL = fit_and_center(xL_slot, yL_slot, wL_slot, hL_slot, pix_L)
+            xR, yR, wR, hR = fit_and_center(xR_slot, yR_slot, wR_slot, hR_slot, pix_R)
+
+            # draw images, now centered in the slot
             c.drawImage(img_L, xL, yL, width=wL, height=hL,
                         preserveAspectRatio=False, anchor="sw")
 
@@ -185,8 +212,8 @@ Upload a **card sheet template** (PDF with the card rectangles), then upload mul
 Each row of the template becomes **one complete card** (left rectangle = front,
 right rectangle = back).  
 
-The app now **crops the extra white space** and makes the card content fill
-**100% of the rectangle area**.
+The app now **crops extra white space** and also **centers the card inside each rectangle
+both horizontally and vertically**.
 """)
 
 template_file = st.file_uploader("1️⃣ Upload card template PDF", type=["pdf"])
