@@ -261,7 +261,6 @@ Optionally upload a **business card template PDF**.
 
 - If business card template is uploaded → cards follow template positions  
 - If no template → generates **A4 sheet with 5 cards per page (front+back)**  
-- All cards are **content-aware trimmed** and **perfectly centered**
 """)
 
 template = st.file_uploader("Optional: Upload a business card template PDF (e.g., Avery Template 5371 Business Cards)", type=["pdf"])
