@@ -256,11 +256,13 @@ def gerar_pdf_a4(card_files):
 st.title("IWBF Player Card Merger")
 
 st.markdown("""
-Upload **player cards PDFs**.  
+Upload **player card PDFs**.  
 Optionally upload a **business card template PDF**.  
 
-- If business card template is uploaded → cards follow template positions  
-- If no template → generates **A4 sheet with 5 cards per page (front+back)**  
+- If a business card template is uploaded → cards follow the template positions  
+- If no template is uploaded → generates **normal A4 sheets with 5 cards per page (front+back)**  
+- It’s strongly recommended that, if you are using business card paper (e.g., Avery Business Cards), you download the PDF template provided by the manufacturer.  
+- If you are using Avery business card paper, **[click here to find and download the official template](https://www.avery.com/templates/category/business-cards)**.
 """)
 
 template = st.file_uploader("Optional: Upload a business card template PDF (e.g., Avery Template 5371 Business Cards)", type=["pdf"])
