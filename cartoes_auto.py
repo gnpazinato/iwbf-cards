@@ -257,15 +257,15 @@ st.title("IWBF Player Card Merger")
 
 st.markdown("""
 Upload **player cards PDFs**.  
-Optionally upload a **Business Card Template PDF**.  
+Optionally upload a **business card template PDF**.  
 
-- If template is uploaded → cards follow template positions  
+- If business card template is uploaded → cards follow template positions  
 - If no template → generates **A4 sheet with 5 cards per page (front+back)**  
 - All cards are **content-aware trimmed** and **perfectly centered**
 """)
 
-template = st.file_uploader("Optional: Upload template PDF (Avery)", type=["pdf"])
-cards = st.file_uploader("Upload athlete card PDFs (front+back)", type=["pdf"], accept_multiple_files=True)
+template = st.file_uploader("Optional: Upload a business card template PDF (e.g., Avery Template 5371 Business Cards)", type=["pdf"])
+cards = st.file_uploader("Upload all the player cards you want to print", type=["pdf"], accept_multiple_files=True)
 
 if st.button("Generate PDF"):
     if not cards:
@@ -281,7 +281,7 @@ if st.button("Generate PDF"):
             st.download_button(
                 "Download PDF",
                 data=pdf,
-                file_name="cards_output.pdf",
+                file_name="merged_cards_output.pdf",
                 mime="application/pdf"
             )
         except Exception as e:
