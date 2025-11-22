@@ -268,22 +268,36 @@ Optionally upload a **business card template PDF**.
 template = st.file_uploader("Optional: Upload a business card template PDF (e.g., Avery Template 5371 Business Cards)", type=["pdf"])
 cards = st.file_uploader("Upload all the player cards you want to print", type=["pdf"], accept_multiple_files=True)
 
-if st.button("Generate PDF"):
-    if not cards:
-        st.error("Upload at least one card PDF.")
-    else:
-        try:
-            if template:
-                pdf = gerar_pdf_final(template.read(), cards)
-            else:
-                pdf = gerar_pdf_a4(cards)
+# progress + upload ready logic
+upload_ready = False
 
-            st.success("PDF generated!")
-            st.download_button(
-                "Download PDF",
-                data=pdf,
-                file_name="merged_cards_output.pdf",
-                mime="application/pdf"
-            )
-        except Exception as e:
-            st.error(f"Error: {e}")
+if cards:
+    total = len(cards)
+    progress = st.progress(0)
+    for i, f in enumerate(cards):
+        progress.progress((i+1)/total)
+    progress.empty()
+
+    st.success(f"{len(cards)} cards uploaded successfully.")
+    upload_ready = True
+else:
+    st.warning("Upload the player cards before continuing.")
+
+
+# button disabled until upload is done
+if st.button("Generate PDF", disabled=not upload_ready):
+    try:
+        if template:
+            pdf = gerar_pdf_final(template.read(), cards)
+        else:
+            pdf = gerar_pdf_a4(cards)
+
+        st.success("PDF generated!")
+        st.download_button(
+            "Download PDF",
+            data=pdf,
+            file_name="merged_cards_output.pdf",
+            mime="application/pdf"
+        )
+    except Exception as e:
+        st.error(f"Error: {e}")
