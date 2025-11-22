@@ -253,11 +253,11 @@ def gerar_pdf_a4(card_files):
 # STREAMLIT UI
 # ============================================================
 
-st.title("🪪 Automatic Card Generator – Two-Sided Athlete Cards")
+st.title("IWBF Player Card Merger")
 
 st.markdown("""
-Upload **player cards (front+back in 1 PDF side-by-side)**.  
-Optionally upload an **Avery/template PDF**.  
+Upload **player cards PDFs**.  
+Optionally upload a **Business Card Template PDF**.  
 
 - If template is uploaded → cards follow template positions  
 - If no template → generates **A4 sheet with 5 cards per page (front+back)**  
